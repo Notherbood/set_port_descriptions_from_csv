@@ -36,11 +36,11 @@ It is designed as a **safe, reusable automation pattern**:
 
 ## Project Files
 
-set_port_descriptions_from_csv.py
-set_port_descriptions_from_csv.example.csv
-.env.example
-.gitignore
-requirements.txt
+- set_port_descriptions_from_csv.py
+- set_port_descriptions_from_csv.example.csv
+- .env.example
+- .gitignore
+- requirements.txt
 
 ---
 
@@ -62,9 +62,9 @@ host,interface,description
 
 Create a `.env` file locally with:
 
-NET_USER=your_username
-NET_PASS=your_password
-NET_SECRET=your_enable_secret # optional, if required
+- NET_USER=your_username
+- NET_PASS=your_password
+- NET_SECRET=your_enable_secret # optional, if required
 
 A template is provided in `.env.example`.
 
