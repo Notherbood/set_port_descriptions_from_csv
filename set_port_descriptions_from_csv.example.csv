@@ -1,0 +1,10 @@
+host,interface,description
+10.0.0.1,Gi1/0/10,Example
+10.0.0.1,Gi1/0/11,Example
+10.0.0.1,Gi1/0/12,Example
+10.0.0.2,Gi1/0/10,Example
+10.0.0.2,Gi1/0/11,Example
+10.0.0.2,Gi1/0/12,Example
+10.0.0.3,Gi1/0/10,Example
+10.0.0.3,Gi1/0/11,Example
+10.0.0.3,Gi1/0/12,Example
