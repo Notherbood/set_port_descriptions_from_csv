@@ -60,7 +60,7 @@ host,interface,description
 
 ## Environment Variables
 
-Create a `.env` file locally (not committed) with:
+Create a `.env` file locally with:
 
 NET_USER=your_username
 NET_PASS=your_password
