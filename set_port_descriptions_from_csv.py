@@ -9,8 +9,7 @@ from dotenv import load_dotenv
 
 # Name of the CSV file that contains:
 # host,interface,description
-CSV_FILE = "set_port_descriptions_from_csv.example.csv"
-
+CSV_FILE = "set_port_descriptions_from_csv.csv"
 
 # Resolve the directory where this script lives
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -25,7 +24,6 @@ if not env_path.exists():
 # Load if found (silent if missing)
 load_dotenv(env_path)
 
-
 # Loads credentials from .env
 USERNAME = os.environ.get("NET_USER")
 PASSWORD = os.environ.get("NET_PASS")
@@ -33,8 +31,7 @@ SECRET   = os.environ.get("NET_SECRET")
 
 # In case of failure
 if not USERNAME or not PASSWORD:
-    raise SystemExit("Missing NET_USER or NET_PASS. Create a .env file (see .env.example).")
-
+    raise SystemExit("Missing NET_USER or NET_PASS. Create a .env file")
 
 # How many switches to work on in parallel
 threads = 10
@@ -45,6 +42,15 @@ threads = 10
 # defaultdict(list) means:
 # - If you access devices_interfaces[some_host] and it doesn't exist yet,
 #   it automatically creates an empty list instead of raising a KeyError.
+# This is so devices_interfaces[host].append((iface, desc))
+#   Look for key host
+#   If it doesn’t exist → create []
+#   Append (iface, desc) to that list
+# This removes the need for the next line
+#    if host not in devices_interfaces:
+#        devices_interfaces[host] = []
+
+
 devices_interfaces = defaultdict(list)
 
 # ---- 1) Load data from CSV ----
@@ -76,17 +82,12 @@ if not devices_interfaces:
 
 
 def configure_switch(host, entries):
+    # Connects to a single switch, applies all interface descriptions for that
+    # switch, saves the configuration, and verifies the result.
+    # This function runs inside a thread.
+    # It returns a single text block to be printed by the main thread.
     
-    # Connect to one switch (identified by 'host'),
-    # apply all interface descriptions given in 'entries',
-    # then save the configuration.
-
-    # entries is a list of (interface, description) tuples.
-    # For example:
-    # [("Gi1/0/1", "PC-01"), ("Gi1/0/2", "Printer-02")]
-    
-    print(f"\n=== Connecting to {host} ===")
-
+    # Netmiko device definition for this switch
     device = {
         "device_type": "cisco_ios",
         "host": host,
@@ -95,7 +96,7 @@ def configure_switch(host, entries):
         "secret": SECRET,
     }
 
-    # lets 'finally' know whether a connection was created
+   # Initialize connection variable so `finally` can safely close it
     conn = None
 
     try:
@@ -106,33 +107,76 @@ def configure_switch(host, entries):
         if SECRET:
             conn.enable()
 
-        # Build the list of config commands to send
-        # For each (iface, desc), we add:
+        # Build configuration commands
+        #
+        # entries example:
+        #   [("Gi1/0/1", "PC-01"), ("Gi1/0/2", "Printer-02")]
+        #
+        # Resulting command list:
         #   interface Gi1/0/1
-        #   description Something
+        #   description PC-01
+        #   interface Gi1/0/2
+        #   description Printer-02
+        
         config_cmds = []
         for iface, desc in entries:
             config_cmds.append(f"interface {iface}")
-            config_cmds.append(f"description {desc}")
 
-        print(f">>> Applying configuration on {host}...")
-        # Send all configuration lines in one batch
+    # If CSV says "blank" (case-insensitive), remove the description
+            if desc.strip().lower() == "blank":
+                config_cmds.append("no description")
+            else:
+                config_cmds.append(f"description {desc}")
+
+        # Push all configuration in one batch
         # Netmiko handles entering/exiting config mode internally
         conn.send_config_set(config_cmds)
+        # Netmiko internally does
+        # conf t
+        # interface Gi1/0/1
+        # description Test1
 
-        print(f">>> Saving configuration on {host}...")
         # Save running-config to startup-config (write memory)
         conn.save_config()
 
-        print(f">>> SUCCESS: {host}")
-        # Return a tuple indicating success and which host was processed
-        return True, host
+        # Build ONE output block
+        out_lines = []
+        out_lines.append(f">>> Verifying interface descriptions on {host}:")
 
+        for iface, _ in entries:
+            # Run verification command per interface
+            output = conn.send_command(
+                f"show interface {iface} description",
+                use_textfsm=False
+            ).strip()
+
+            # Drop header lines and blanks, keep only the real interface line(s)
+            for line in output.splitlines():
+                line_stripped = line.strip()
+
+                # Skip empty lines
+                if not line_stripped:
+                    continue
+
+                # Skip the header line (starts with "Interface")
+                if line_stripped.lower().startswith("interface"):
+                    continue
+
+                # Keep only the actual interface description line
+                out_lines.append(line)
+
+        # Join all verification lines into one printable block
+        verify_block = "\n".join(out_lines)                
+
+        # Success return:
+        #   - True  → switch succeeded
+        #   - host  → which switch this refers to
+        #   - text  → full verification output
+        return True, host, verify_block
+    
     except Exception as e:
-        # If anything goes wrong (SSH error, timeout, etc.), we land here
-        print(f"XXX ERROR on {host}: {e}")
-        # Return a tuple indicating failure and which host failed
-        return False, host
+        # Failure return (error text instead of printed output)
+        return False, host, f"XXX ERROR on {host}: {e}"
     
     finally:
         # Always close the connection if it was opened
@@ -141,35 +185,43 @@ def configure_switch(host, entries):
 
 
 # ---- 2) Thread pool execution ----
-# 'results' will collect (ok, host) for each switch.
-#   ok   = True/False
-#   host = IP/hostname
-results = []
+# results structure:
+#   {
+#     "10.0.0.1": (True,  "<verification text>"),
+#     "10.0.0.2": (False, "<error text>")
+#   }
+results = {}
 
-# Create a thread pool with 'threads' worker threads.
-# Each worker can handle one switch at a time.
 with ThreadPoolExecutor(max_workers=threads) as executor:
-    # Submit one job per host. Each job runs configure_switch(host, entries).
-    # 'futures' is a dict:
-    #   future_object -> host
+    # Submit one task per switch
+    # Each task runs configure_switch(host, entries)
     futures = {
         executor.submit(configure_switch, host, entries): host
         for host, entries in devices_interfaces.items()
     }
-
-    # as_completed(futures) yields futures as they finish (in completion order,
-    # not submission order).
+    # as_completed() yields futures as they finish (order is non-deterministic)
     for future in as_completed(futures):
-        # Get the result from the future (this calls configure_switch's return)
-        ok, host = future.result()
-        # Store (ok, host) into the results list
-        results.append((ok, host))
+        # Unpack the returned tuple from configure_switch()
+        ok, host, text = future.result()
+        # Store result keyed by host for later ordered printing
+        results[host] = (ok, text)
 
+# ---- 3) Print grouped output ----
+for host in sorted(results):
+    ok, text = results[host]
 
-# ---- 3) Summary ----
-# Extract successes and failures from results using list comprehensions.
-successes = [host for ok, host in results if ok]
-failures  = [host for ok, host in results if not ok]
+    # Print the full verification or error block
+    print(text)
+
+    # Print success line only for successful hosts
+    if ok:
+        print(f">>> SUCCESS: {host}")
+    print()  # Blank line between hosts
+
+# ---- 4) Summary ----
+# Extract hostnames based on success/failure
+successes = [h for h, (ok, _) in results.items() if ok]
+failures  = [h for h, (ok, _) in results.items() if not ok]
 
 print("\n========== SUMMARY ==========")
 print(f"Total switches:  {len(results)}")
